@@ -1,0 +1,108 @@
+name: Build Makoto APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      llama_cpp_ref:
+        description: "Version de llama.cpp"
+        required: true
+        default: "b10502"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract Makoto ZIP
+        shell: bash
+        run: |
+          ZIP_FILE=""
+
+          for name in Makoto_0.3_CORREGIDO.zip Makoto_0.3.zip; do
+            if [ -f "$name" ]; then
+              ZIP_FILE="$name"
+              break
+            fi
+          done
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "::error::No se encontro el ZIP de Makoto en la raiz."
+            ls -la
+            exit 1
+          fi
+
+          mkdir -p _makoto_unpack
+          unzip -q "$ZIP_FILE" -d _makoto_unpack
+
+          mapfile -t WRAPPERS < <(
+            find _makoto_unpack -type f -name gradlew
+          )
+
+          if [ "${#WRAPPERS[@]}" -ne 1 ]; then
+            echo "::error::No se encontro un unico proyecto Android."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "${WRAPPERS[0]}")"
+
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/settings.gradle.kts"
+          test -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.jar"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android tools
+        run: |
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.2.12479018" \
+            "cmake;3.22.1"
+
+      - name: Download llama.cpp
+        env:
+          LLAMA_CPP_REF: ${{ inputs.llama_cpp_ref }}
+        run: |
+          mkdir -p "$PROJECT_DIR/app/src/main/cpp"
+
+          git clone \
+            --depth 1 \
+            --branch "$LLAMA_CPP_REF" \
+            https://github.com/ggml-org/llama.cpp.git \
+            "$PROJECT_DIR/app/src/main/cpp/llama.cpp"
+
+      - name: Verify native files
+        run: |
+          test -f "$PROJECT_DIR/app/src/main/cpp/CMakeLists.txt"
+          test -f "$PROJECT_DIR/app/src/main/cpp/makoto_jni.cpp"
+          test -f "$PROJECT_DIR/app/src/main/cpp/llama.cpp/CMakeLists.txt"
+
+      - name: Build APK
+        run: |
+          cd "$PROJECT_DIR"
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: makoto-0.3-debug
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7
